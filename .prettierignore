@@ -1,0 +1,6 @@
+coverage/
+dist/
+node_modules/
+/docs-slate/
+/tests/json-test-suite/
+/tests/yaml-test-suite/
