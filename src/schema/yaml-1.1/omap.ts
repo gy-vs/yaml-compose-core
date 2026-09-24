@@ -52,7 +52,7 @@ export class YAMLOMap<
     if (!ctx) return super.toJS(doc) as never[]
     const map = new Map()
     if (this.anchor) {
-      ctx.anchors.set(this, { aliasCount: 0, count: 1, res: map })
+      ctx.setAnchor(this, map)
     }
     for (const pair of this) {
       const key = pair.key.toJS(doc, ctx)

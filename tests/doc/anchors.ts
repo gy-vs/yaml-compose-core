@@ -155,7 +155,13 @@ describe('errors', () => {
     const doc = parseDocument(src, { merge: true })
     expect(doc.errors).toHaveLength(0)
     expect(doc.warnings).toHaveLength(0)
-    expect(() => doc.toJS()).toThrow('Maximum call stack size exceeded')
+    // A self-merging anchor is treated as alias expansion abuse, not as a
+    // plain stack overflow, regardless of the actual alias count.
+    const msg = 'Excessive alias count indicates a resource exhaustion attack'
+    expect(() => doc.toJS()).toThrow(ReferenceError)
+    expect(() => doc.toJS()).toThrow(msg)
+    expect(() => doc.toJS({ maxAliasCount: 1 })).toThrow(msg)
+    expect(() => doc.toJS({ maxAliasCount: 2 })).toThrow(msg)
     expect(() => doc.toJS({ maxAliasCount: 0 })).toThrow(ReferenceError)
     expect(String(doc)).toBe(src)
   })
@@ -360,6 +366,21 @@ describe('merge <<', () => {
         'Merge sources must be maps or map aliases'
       )
     })
+
+    test('alias to a later node', () => {
+      const doc = parseDocument<YAMLSeq<YAMLMap>, false>(
+        '[{ b: B }, { a: A }]',
+        { merge: true }
+      )
+      const [first, later] = doc.value
+      later.anchor = 'AA'
+      const alias = doc.createAlias(later)
+      first.set(doc.createPair('<<', alias))
+      expect(() => doc.toJS()).toThrow(ReferenceError)
+      expect(() => doc.toJS()).toThrow(
+        'Unresolved alias (the anchor must be set before the alias): AA'
+      )
+    })
   })
 
   describe('merge multiple times', () => {
@@ -444,6 +465,130 @@ y:
   test('do not throw error when key is null', () => {
     const src = ': 123'
     expect(() => parse(src, { merge: true })).not.toThrow()
+  })
+
+  describe('maxAliasCount', () => {
+    const msg = 'Excessive alias count indicates a resource exhaustion attack'
+
+    test('exponential merge expansion', () => {
+      // Every layer merges the previous one ten times, so the work grows by
+      // 10x per layer even though the resulting maps only gain one key.
+      let src = 'l0: &l0 { a: 1 }\n'
+      for (let i = 1; i <= 7; i++) {
+        const refs = Array(10)
+          .fill(`*l${i - 1}`)
+          .join(', ')
+        src += `l${i}: &l${i} { <<: [${refs}], k${i}: 1 }\n`
+      }
+      expect(() => parse(src, { merge: true })).toThrow(ReferenceError)
+      expect(() => parse(src, { merge: true })).toThrow(msg)
+    })
+
+    test('single alias as a merge value', () => {
+      const parseN = (n: number) => {
+        let src = 'base: &base { a: A }\n'
+        for (let i = 0; i < n; i++) src += `m${i}: { <<: *base }\n`
+        return () => parse(src, { merge: true })
+      }
+      expect(parseN(99)).not.toThrow()
+      expect(parseN(100)).toThrow(ReferenceError)
+      expect(parseN(100)).toThrow(msg)
+    })
+
+    test('sequence of aliases as a merge value', () => {
+      const parseN = (n: number) => () =>
+        parse(
+          `base: &base { a: A }\n` +
+            `m: { <<: [${Array(n).fill('*base').join(', ')}] }\n`,
+          {
+            merge: true
+          }
+        )
+      expect(parseN(99)).not.toThrow()
+      expect(parseN(100)).toThrow(ReferenceError)
+      expect(parseN(100)).toThrow(msg)
+    })
+
+    test('alias to a sequence of aliases', () => {
+      const src =
+        'base: &base { a: A }\n' +
+        'items: &items [' +
+        Array(100).fill('*base').join(', ') +
+        ']\n' +
+        'm: { <<: *items }\n'
+      expect(() => parse(src, { merge: true })).toThrow(ReferenceError)
+      expect(() => parse(src, { merge: true })).toThrow(msg)
+    })
+
+    test('merge and regular alias references share one count', () => {
+      const parseN = (merges: number) => {
+        let src =
+          'base: &base { a: A }\n' +
+          'plain: [' +
+          Array(60).fill('*base').join(', ') +
+          ']\n'
+        for (let i = 0; i < merges; i++) src += `m${i}: { <<: *base }\n`
+        return () => parse(src, { merge: true })
+      }
+      // 60 plain + 39 merge = 99 references: within the default limit
+      expect(parseN(39)).not.toThrow()
+      // 60 plain + 40 merge = 100 references: counted together, over the limit
+      expect(parseN(40)).toThrow(msg)
+      // 40 merge references alone is fine
+      expect(() =>
+        parse(
+          'base: &base { a: A }\n' +
+            Array.from({ length: 40 }, (_, i) => `m${i}: { <<: *base }`).join(
+              '\n'
+            ) +
+            '\n',
+          { merge: true }
+        )
+      ).not.toThrow()
+    })
+
+    test('maxAliasCount: -1 disables the limit', () => {
+      let src = 'l0: &l0 { a: 1 }\n'
+      for (let i = 1; i <= 4; i++) {
+        const refs = Array(10)
+          .fill(`*l${i - 1}`)
+          .join(', ')
+        src += `l${i}: &l${i} { <<: [${refs}], k${i}: 1 }\n`
+      }
+      const res = parse(src, { merge: true, maxAliasCount: -1 })
+      expect(res.l4).toMatchObject({ a: 1, k1: 1, k2: 1, k3: 1, k4: 1 })
+    })
+
+    test('maxAliasCount: 0 disables alias resolution in merge values', () => {
+      const src = 'base: &base { a: A }\nm: { <<: *base }\n'
+      expect(() => parse(src, { merge: true, maxAliasCount: 0 })).toThrow(
+        ReferenceError
+      )
+      expect(() => parse(src, { merge: true, maxAliasCount: 0 })).toThrow(
+        'Alias resolution is disabled'
+      )
+    })
+
+    test('legitimate repeated merges', () => {
+      // One base anchor merged by ~40 service blocks
+      let src = 'base: &base { image: app, replicas: 1 }\n'
+      for (let i = 0; i < 40; i++)
+        src += `svc${i}: { <<: *base, name: svc${i} }\n`
+      const res = parse(src, { merge: true })
+      expect(res.svc39).toMatchObject({
+        image: 'app',
+        replicas: 1,
+        name: 'svc39'
+      })
+
+      // A hundred distinct anchors, each merged only once or twice
+      let big = ''
+      for (let i = 0; i < 120; i++) big += `a${i}: &a${i} { k${i}: ${i} }\n`
+      for (let i = 0; i < 120; i += 2)
+        big += `u${i}: { <<: [*a${i}, *a${i + 1}], n: ${i} }\n`
+      const res2 = parse(big, { merge: true })
+      expect(res2.u118).toMatchObject({ k118: 118, k119: 119, n: 118 })
+    })
   })
 
   describe('parse errors', () => {

@@ -5,9 +5,9 @@ import type { StringifyContext } from '../stringify/stringify.ts'
 import { visit } from '../visit.ts'
 import { Pair } from './Pair.ts'
 import type { Scalar } from './Scalar.ts'
-import { ToJSContext } from './toJS.ts'
+import { resolveAlias, ToJSContext } from './toJS.ts'
 import type { Node, NodeBase, Range } from './types.ts'
-import type { YAMLMap } from './YAMLMap.ts'
+import { YAMLMap } from './YAMLMap.ts'
 import type { YAMLSeq } from './YAMLSeq.ts'
 import type { YAMLSet } from './YAMLSet.ts'
 
@@ -93,36 +93,8 @@ export class Alias implements NodeBase {
   toJS(doc: Document<DocValue, boolean>, ctx?: ToJSContext): any {
     if (!doc?.schema) throw new TypeError('A document argument is required')
     ctx ??= new ToJSContext()
-    const { anchors, maxAliasCount } = ctx
-
-    const source = this.resolve(doc, ctx)
-    if (!source) {
-      const msg = `Unresolved alias (the anchor must be set before the alias): ${this.source}`
-      throw new ReferenceError(msg)
-    }
-
-    let data = anchors.get(source)
-    if (!data) {
-      // Resolve anchors for Node.prototype.toJS()
-      source.toJS(doc, ctx)
-      data = anchors.get(source)
-    }
-    /* istanbul ignore if */
-    if (data?.res === undefined) {
-      const msg = 'This should not happen: Alias anchor was not resolved?'
-      throw new ReferenceError(msg)
-    }
-    if (maxAliasCount >= 0) {
-      data.count += 1
-      data.aliasCount ||= getAliasCount(doc, ctx, source, anchors)
-      if (data.count * data.aliasCount > maxAliasCount) {
-        const msg =
-          'Excessive alias count indicates a resource exhaustion attack'
-        throw new ReferenceError(msg)
-      }
-    }
-
-    return data.res
+    const source = resolveAlias(doc, ctx, this)
+    return ctx.anchors.get(source)?.res
   }
 
   toString(
@@ -143,7 +115,7 @@ export class Alias implements NodeBase {
   }
 }
 
-function getAliasCount(
+export function getAliasCount(
   doc: Document,
   ctx: ToJSContext,
   node: Node | Pair | null,
@@ -157,6 +129,13 @@ function getAliasCount(
     const kc = getAliasCount(doc, ctx, node.key, anchors)
     const vc = getAliasCount(doc, ctx, node.value, anchors)
     return Math.max(kc, vc)
+  } else if (node instanceof YAMLMap) {
+    let count = 0
+    for (const pair of node.values.values()) {
+      const c = getAliasCount(doc, ctx, pair, anchors)
+      if (c > count) count = c
+    }
+    return count
   } else if (Array.isArray(node)) {
     let count = 0
     for (const item of node) {

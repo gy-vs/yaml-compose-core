@@ -1,7 +1,8 @@
 import type { Document, DocValue } from '../../doc/Document.ts'
 import { Alias } from '../../nodes/Alias.ts'
 import { Scalar } from '../../nodes/Scalar.ts'
-import type { ToJSContext } from '../../nodes/toJS.ts'
+import { resolveAlias, type ToJSContext } from '../../nodes/toJS.ts'
+import type { Node } from '../../nodes/types.ts'
 import { type MapLike, YAMLMap } from '../../nodes/YAMLMap.ts'
 import type { ScalarTag } from '../types.ts'
 
@@ -49,12 +50,46 @@ export function addMergeToJSMap(
   value: unknown,
   isPlainObject: boolean
 ): void {
-  value = ctx && value instanceof Alias ? value.resolve(doc, ctx) : value
+  value = resolveMergeValue(doc, ctx, value)
   if (Array.isArray(value) && !(value instanceof YAMLMap)) {
     for (const it of value) mergeValue(doc, ctx, map, it, isPlainObject)
   } else {
     mergeValue(doc, ctx, map, value, isPlainObject)
   }
+}
+
+/**
+ * Resolve the alias references in a merge-key value, counting them together
+ * with regular alias references against `maxAliasCount`. Non-alias values are
+ * returned as-is. An alias may resolve directly to a mapping or to a sequence
+ * of mappings and/or aliases.
+ */
+function resolveMergeValue(
+  doc: Document<DocValue, boolean>,
+  ctx: ToJSContext,
+  value: unknown
+): unknown {
+  if (value instanceof Alias) {
+    const source = resolveAlias(doc, ctx, value)
+    if (Array.isArray(source) && !(source instanceof YAMLMap))
+      return resolveMergeSeq(doc, ctx, source as Node[])
+    // For mappings, the source node itself is merged; for non-map values the
+    // source is passed on unchanged so that a "must be maps" error is thrown.
+    return source
+  }
+  if (Array.isArray(value) && !(value instanceof YAMLMap))
+    return resolveMergeSeq(doc, ctx, value as Node[])
+  return value
+}
+
+function resolveMergeSeq(
+  doc: Document<DocValue, boolean>,
+  ctx: ToJSContext,
+  seq: Node[]
+): Node[] {
+  return seq.map(item =>
+    item instanceof Alias ? resolveAlias(doc, ctx, item) : item
+  )
 }
 
 function mergeValue(
@@ -64,7 +99,7 @@ function mergeValue(
   value: unknown,
   isPlainObject: boolean
 ) {
-  const source = value instanceof Alias ? value.resolve(doc, ctx) : value
+  const source = value
   const srcMap = (source as YAMLMap).toJS(doc, ctx, Map<any, any>)
   if (!(srcMap instanceof Map))
     throw new Error('Merge sources must be maps or map aliases')

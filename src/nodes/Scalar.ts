@@ -96,9 +96,7 @@ export class Scalar<T = unknown> implements NodeBase {
 
   /** A plain JavaScript representation of this node. */
   toJS(_doc?: unknown, ctx?: ToJSContext): T {
-    if (ctx && this.anchor) {
-      ctx.anchors.set(this, { aliasCount: 0, count: 1, res: this.value })
-    }
+    if (ctx && this.anchor) ctx.setAnchor(this, this.value)
     return this.value
   }
 
