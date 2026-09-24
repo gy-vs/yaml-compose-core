@@ -591,6 +591,33 @@ describe('Resource exhaustion attacks', () => {
         })
       }
     })
+
+    describe('Exponential expansion through merge keys', () => {
+      const rows = ['l0: &l0 { a: 1 }']
+      for (let i = 1; i <= 7; ++i) {
+        const refs = Array(10)
+          .fill(`*l${i - 1}`)
+          .join(', ')
+        rows.push(`l${i}: &l${i} { <<: [${refs}], k${i}: 1 }`)
+      }
+      const src = rows.join('\n')
+
+      test('limited by default', () => {
+        expect(() => YAML.parse(src, { merge: true })).toThrow(
+          new ReferenceError(
+            'Excessive alias count indicates a resource exhaustion attack'
+          )
+        )
+      })
+
+      test('works sensibly with disabled limits', () => {
+        const res = YAML.parse(rows.slice(0, 5).join('\n'), {
+          merge: true,
+          maxAliasCount: -1
+        })
+        expect(res.l4).toEqual({ a: 1, k1: 1, k2: 1, k3: 1, k4: 1 })
+      })
+    })
   })
 })
 

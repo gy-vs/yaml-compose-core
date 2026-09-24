@@ -155,8 +155,16 @@ describe('errors', () => {
     const doc = parseDocument(src, { merge: true })
     expect(doc.errors).toHaveLength(0)
     expect(doc.warnings).toHaveLength(0)
-    expect(() => doc.toJS()).toThrow('Maximum call stack size exceeded')
-    expect(() => doc.toJS({ maxAliasCount: 0 })).toThrow(ReferenceError)
+    for (const maxAliasCount of [undefined, 1, 2, 100] as const) {
+      expect(() => doc.toJS({ maxAliasCount })).toThrow(
+        new ReferenceError(
+          'Excessive alias count indicates a resource exhaustion attack'
+        )
+      )
+    }
+    expect(() => doc.toJS({ maxAliasCount: 0 })).toThrow(
+      new ReferenceError('Alias resolution is disabled')
+    )
     expect(String(doc)).toBe(src)
   })
 })
@@ -360,6 +368,20 @@ describe('merge <<', () => {
         'Merge sources must be maps or map aliases'
       )
     })
+
+    test('merge alias to a later node', () => {
+      const doc = parseDocument<YAMLSeq<YAMLMap>, false>(
+        '[{ b: B }, { a: A }]',
+        { merge: true }
+      )
+      const alias = doc.createAlias(doc.get(1), 'AA')
+      doc.get(0).set(doc.createPair('<<', alias))
+      expect(() => doc.toJS()).toThrow(
+        new ReferenceError(
+          'Unresolved alias (the anchor must be set before the alias): AA'
+        )
+      )
+    })
   })
 
   describe('merge multiple times', () => {
@@ -472,6 +494,127 @@ y:
       expect(() => parse('&a{}')).toThrow(
         'Tags and anchors must be separated from the next token by white space'
       )
+    })
+
+    test('merge alias to a later anchor', () => {
+      const src = 'a: { <<: *A, b: 1 }\nlater: &A { x: 1 }'
+      expect(() => parse(src, { merge: true })).toThrow(
+        new ReferenceError(
+          'Unresolved alias (the anchor must be set before the alias): A'
+        )
+      )
+    })
+  })
+
+  describe('maxAliasCount', () => {
+    const expMsg =
+      'Excessive alias count indicates a resource exhaustion attack'
+
+    test('single merge alias', () => {
+      const src = (n: number) =>
+        ['base: &b { x: 1 }']
+          .concat(
+            Array.from({ length: n }, (_, i) => `s${i}: { <<: *b, k: ${i} }`)
+          )
+          .join('\n')
+      expect(() =>
+        parse(src(4), { merge: true, maxAliasCount: 5 })
+      ).not.toThrow()
+      const fn = () => parse(src(5), { merge: true, maxAliasCount: 5 })
+      expect(fn).toThrow(ReferenceError)
+      expect(fn).toThrow(expMsg)
+    })
+
+    test('sequence of merge aliases', () => {
+      const src = (n: number) =>
+        `base: &b { x: 1 }\ns: { <<: [${Array(n).fill('*b').join(', ')}] }`
+      expect(() =>
+        parse(src(4), { merge: true, maxAliasCount: 5 })
+      ).not.toThrow()
+      const fn = () => parse(src(5), { merge: true, maxAliasCount: 5 })
+      expect(fn).toThrow(ReferenceError)
+      expect(fn).toThrow(expMsg)
+    })
+
+    test('merge alias of a sequence', () => {
+      const src = 'maps: &maps [{ x: 1 }, { y: 2 }]\n'
+      expect(() =>
+        parse(`${src}a: { <<: *maps }`, { merge: true, maxAliasCount: 2 })
+      ).not.toThrow()
+      const fn = () =>
+        parse(`${src}a: { <<: *maps }\nb: { <<: *maps }`, {
+          merge: true,
+          maxAliasCount: 2
+        })
+      expect(fn).toThrow(ReferenceError)
+      expect(fn).toThrow(expMsg)
+    })
+
+    test('merge and plain aliases to one anchor are counted together', () => {
+      const src = [
+        'base: &b { x: 1 }',
+        'r1: *b',
+        'r2: *b',
+        'm1: { <<: *b }',
+        'm2: { <<: *b }'
+      ].join('\n')
+      const res = parse(src, { merge: true, maxAliasCount: 5 })
+      expect(res).toMatchObject({ r2: { x: 1 }, m2: { x: 1 } })
+      const fn = () => parse(src, { merge: true, maxAliasCount: 4 })
+      expect(fn).toThrow(ReferenceError)
+      expect(fn).toThrow(expMsg)
+    })
+
+    test('maxAliasCount: 0 disables merge aliases', () => {
+      const src = 'a: &a { x: 1 }\nb: { <<: *a }'
+      expect(() => parse(src, { merge: true, maxAliasCount: 0 })).toThrow(
+        new ReferenceError('Alias resolution is disabled')
+      )
+    })
+
+    test('maxAliasCount: -1 disables the limit', () => {
+      const rows = ['l0: &l0 { a: 1 }']
+      for (let i = 1; i <= 4; ++i) {
+        const refs = Array(10)
+          .fill(`*l${i - 1}`)
+          .join(', ')
+        rows.push(`l${i}: &l${i} { <<: [${refs}], k${i}: 1 }`)
+      }
+      const res = parse(rows.join('\n'), { merge: true, maxAliasCount: -1 })
+      expect(res.l4).toEqual({ a: 1, k1: 1, k2: 1, k3: 1, k4: 1 })
+    })
+
+    test('one anchor merged many times below the default limit', () => {
+      const rows = ['base: &base { image: app, restart: always }']
+      for (let i = 0; i < 40; ++i) {
+        const restart = i === 39 ? ', restart: never' : ''
+        rows.push(`svc${i}: { <<: *base, name: svc${i}${restart} }`)
+      }
+      const res = parse(rows.join('\n'), { merge: true })
+      expect(res.svc0).toEqual({
+        image: 'app',
+        restart: 'always',
+        name: 'svc0'
+      })
+      expect(res.svc39).toEqual({
+        image: 'app',
+        restart: 'never',
+        name: 'svc39'
+      })
+    })
+
+    test('many anchors each merged a few times', () => {
+      const rows: string[] = []
+      for (let i = 0; i < 150; ++i) {
+        rows.push(
+          `a${i}: &a${i} { k: ${i} }`,
+          `b${i}: { <<: *a${i}, x: 1 }`,
+          `c${i}: { <<: *a${i}, y: 2 }`
+        )
+      }
+      const res = parse(rows.join('\n'), { merge: true })
+      expect(res.b0).toEqual({ k: 0, x: 1 })
+      expect(res.c149).toEqual({ k: 149, y: 2 })
     })
   })
 

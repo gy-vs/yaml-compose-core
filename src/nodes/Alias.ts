@@ -93,7 +93,6 @@ export class Alias implements NodeBase {
   toJS(doc: Document<DocValue, boolean>, ctx?: ToJSContext): any {
     if (!doc?.schema) throw new TypeError('A document argument is required')
     ctx ??= new ToJSContext()
-    const { anchors, maxAliasCount } = ctx
 
     const source = this.resolve(doc, ctx)
     if (!source) {
@@ -101,28 +100,7 @@ export class Alias implements NodeBase {
       throw new ReferenceError(msg)
     }
 
-    let data = anchors.get(source)
-    if (!data) {
-      // Resolve anchors for Node.prototype.toJS()
-      source.toJS(doc, ctx)
-      data = anchors.get(source)
-    }
-    /* istanbul ignore if */
-    if (data?.res === undefined) {
-      const msg = 'This should not happen: Alias anchor was not resolved?'
-      throw new ReferenceError(msg)
-    }
-    if (maxAliasCount >= 0) {
-      data.count += 1
-      data.aliasCount ||= getAliasCount(doc, ctx, source, anchors)
-      if (data.count * data.aliasCount > maxAliasCount) {
-        const msg =
-          'Excessive alias count indicates a resource exhaustion attack'
-        throw new ReferenceError(msg)
-      }
-    }
-
-    return data.res
+    return countAlias(doc, ctx, source).res
   }
 
   toString(
@@ -141,6 +119,42 @@ export class Alias implements NodeBase {
     }
     return src
   }
+}
+
+/**
+ * Count a reference to the anchored `source` node, resolving it first if
+ * necessary. Throws a `ReferenceError` if the total number of references
+ * to the anchor exceeds `ctx.maxAliasCount`.
+ *
+ * Used for `<<` merge keys as well as plain aliases, so that all
+ * references to an anchor are counted together against the same limit.
+ */
+export function countAlias(
+  doc: Document<DocValue, boolean>,
+  ctx: ToJSContext,
+  source: Scalar | YAMLMap | YAMLSeq | YAMLSet
+): { aliasCount: number; count: number; res: unknown } {
+  const { anchors, maxAliasCount } = ctx
+  let data = anchors.get(source)
+  if (!data) {
+    // Resolve anchors for Node.prototype.toJS()
+    source.toJS(doc, ctx)
+    data = anchors.get(source)
+  }
+  /* istanbul ignore if */
+  if (data?.res === undefined) {
+    const msg = 'This should not happen: Alias anchor was not resolved?'
+    throw new ReferenceError(msg)
+  }
+  if (maxAliasCount >= 0) {
+    data.count += 1
+    data.aliasCount ||= getAliasCount(doc, ctx, source, anchors)
+    if (data.count * data.aliasCount > maxAliasCount) {
+      const msg = 'Excessive alias count indicates a resource exhaustion attack'
+      throw new ReferenceError(msg)
+    }
+  }
+  return data
 }
 
 function getAliasCount(

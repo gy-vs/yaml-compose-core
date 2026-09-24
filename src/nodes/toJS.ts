@@ -17,7 +17,14 @@ export class ToJSContext {
   }
 
   setAnchor(node: Node, res: unknown): void {
-    this.anchors.set(node, { aliasCount: 0, count: 1, res })
+    const data = this.anchors.get(node)
+    if (data) {
+      // The node is being resolved again, e.g. by a << merge key.
+      // Keep counting its alias references rather than starting over.
+      data.res = res
+    } else {
+      this.anchors.set(node, { aliasCount: 0, count: 1, res })
+    }
   }
 }
 
